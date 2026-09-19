@@ -22707,6 +22707,14 @@ function getKapitelLabel(fach, kapitelId) {
 
 // ===== NAVIGATION =====
 function showPage(pageId, navEl) {
+  // Prueufungsseite wird verlassen -> Bearbeitungsstand sofort sichern
+  try {
+    if (pageId !== 'pruefungssimulation-v2'
+        && typeof ps2StandSpeichern === 'function') {
+      const seite = document.getElementById('page-pruefungssimulation-v2');
+      if (seite && seite.classList.contains('active')) ps2StandSpeichern();
+    }
+  } catch (e) {}
   // Fixed-position pages müssen explizit display:none bekommen
   const fixedPages = ['op-quiz', 'op-auswertung'];
   document.querySelectorAll('.page').forEach(p => {
@@ -36661,6 +36669,8 @@ function aktuellePunkteGesamt(){
 }
 
 function updateScoreHeader(){
+  // Jede Punkteaenderung ist auch eine Standaenderung -> sichern
+  try { if (typeof ps2StandSpeichernSpaeter === 'function') ps2StandSpeichernSpaeter(); } catch (e) {}
   const max = maxPunkteGesamt();
   const pkt = aktuellePunkteGesamt();
   const pct = max>0 ? Math.round(pkt/max*100) : 0;
@@ -38533,6 +38543,12 @@ function pruefungAbgeben(){
   PRUEFUNG_ABGEGEBEN = true;
   const gespeichert = speichereBericht(bericht);
 
+  // Erst mit der Abgabe wird der Bearbeitungsstand dieses Jahrgangs verworfen -
+  // beim naechsten Oeffnen startet er frisch.
+  if (AKTUELLER_JAHRGANG && AKTUELLER_JAHRGANG.id) {
+    ps2StandLoeschen(AKTUELLER_JAHRGANG.id);
+  }
+
   updateScoreHeader();
   renderAufgabe();      // Abgabe-Bereich zeigt jetzt den "Abgegeben"-Status
   renderErgebnis();
@@ -38605,6 +38621,125 @@ function toggleVerlaufDetails(idx){
   const el = document.getElementById('verlauf-details-'+idx);
   if (el) el.classList.toggle('offen');
 }
+
+
+// ============================================================
+// BEARBEITUNGSSTAND JE JAHRGANG
+// Der Stand einer angefangenen Pruefung bleibt erhalten, bis sie abgegeben
+// wird. Gespeichert wird pro Jahrgang unter einem eigenen Schluessel.
+// ============================================================
+const PS2_STAND_PREFIX = 'logta-bwh-stand-';
+
+// Die Tabellen, die zusammen den Bearbeitungsstand ergeben.
+// Reihenfolge und Namen muessen zu ps2StandLaden() passen.
+function ps2StandTabellen(){
+  return {
+    PUNKTESTAND: PUNKTESTAND,
+    PUNKTESTAND_SCHRITT: PUNKTESTAND_SCHRITT,
+    GEGEBEN_GELOEST: GEGEBEN_GELOEST,
+    GEGEBEN_EINGABEN: GEGEBEN_EINGABEN,
+    FORMEL_GELOEST: FORMEL_GELOEST,
+    FORMEL_GESPERRT: FORMEL_GESPERRT,
+    FORMEL_ERSTVERSUCH_RICHTIG: FORMEL_ERSTVERSUCH_RICHTIG,
+    FORMEL_GEWAEHLT_IDX: FORMEL_GEWAEHLT_IDX,
+    FORMEL_REIHENFOLGE: FORMEL_REIHENFOLGE,
+    EINSETZEN_GELOEST: EINSETZEN_GELOEST,
+    EINSETZEN_GESPERRT: EINSETZEN_GESPERRT,
+    EINSETZEN_ERSTVERSUCH_RICHTIG: EINSETZEN_ERSTVERSUCH_RICHTIG,
+    EINSETZEN_KORREKT: EINSETZEN_KORREKT,
+    EINSETZEN_EINGABEN: EINSETZEN_EINGABEN,
+    ERGEBNIS_GESPERRT: ERGEBNIS_GESPERRT,
+    ERGEBNIS_EINGABEN: ERGEBNIS_EINGABEN,
+    ERGEBNIS_KORREKT: ERGEBNIS_KORREKT,
+    ERGEBNIS_FEEDBACK: ERGEBNIS_FEEDBACK,
+    RECHENWEG_PUNKTE: RECHENWEG_PUNKTE,
+    ERGEBNIS_PUNKTE: ERGEBNIS_PUNKTE,
+    TEXT_EINGABEN: TEXT_EINGABEN,
+    TEXT_VERGLICHEN: TEXT_VERGLICHEN,
+    NOTE_GESPERRT: NOTE_GESPERRT,
+    ZUORDNUNG_GEWAEHLT: ZUORDNUNG_GEWAEHLT,
+    ZUORDNUNG_GESPERRT: ZUORDNUNG_GESPERRT,
+    ZUORDNUNG_KORREKT: ZUORDNUNG_KORREKT,
+    OFFENE_TEIL: OFFENE_TEIL
+  };
+}
+
+// Speichert den Stand des gerade geoeffneten Jahrgangs.
+// Wird nach jeder Aenderung aufgerufen; scheitert es (z. B. privater Modus),
+// laeuft die App normal weiter - nur eben ohne Sicherung.
+let ps2SpeicherTimer = null;
+function ps2StandSpeichern(){
+  try {
+    if (!AKTUELLER_JAHRGANG || !AKTUELLER_JAHRGANG.id) return;
+    if (PRUEFUNG_ABGEGEBEN) return;          // nach der Abgabe wird nichts mehr gesichert
+    const tab = ps2StandTabellen();
+    const daten = { v: 1, aufgabe: aktuelleAufgabe, tabellen: {} };
+    let leer = true;
+    Object.keys(tab).forEach(function(name){
+      const m = tab[name];
+      if (m && Object.keys(m).length) { daten.tabellen[name] = m; leer = false; }
+    });
+    const key = PS2_STAND_PREFIX + AKTUELLER_JAHRGANG.id;
+    if (leer && !aktuelleAufgabe) { lsRemove(key); return; }
+    lsSet(key, JSON.stringify(daten));
+  } catch (e) { /* Speichern ist Komfort, kein Muss */ }
+}
+
+// Sammelt schnelle Aenderungen und speichert gebuendelt.
+function ps2StandSpeichernSpaeter(){
+  try {
+    if (ps2SpeicherTimer) clearTimeout(ps2SpeicherTimer);
+    ps2SpeicherTimer = setTimeout(ps2StandSpeichern, 400);
+  } catch (e) {}
+}
+
+// Holt den gespeicherten Stand eines Jahrgangs zurueck.
+function ps2StandLaden(jahrgangId){
+  try {
+    const roh = lsGet(PS2_STAND_PREFIX + jahrgangId);
+    if (!roh) return false;
+    const daten = JSON.parse(roh);
+    if (!daten || !daten.tabellen) return false;
+    const tab = ps2StandTabellen();
+    Object.keys(daten.tabellen).forEach(function(name){
+      const ziel = tab[name];
+      if (!ziel) return;                      // unbekannte Tabelle: ueberspringen
+      const quelle = daten.tabellen[name];
+      Object.keys(quelle).forEach(function(k){ ziel[k] = quelle[k]; });
+    });
+    if (typeof daten.aufgabe === 'number' && daten.aufgabe >= 0
+        && daten.aufgabe < AUFGABEN.length) {
+      aktuelleAufgabe = daten.aufgabe;
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
+// Loescht den Stand eines Jahrgangs - nur beim Abgeben.
+function ps2StandLoeschen(jahrgangId){
+  try { lsRemove(PS2_STAND_PREFIX + jahrgangId); } catch (e) {}
+}
+
+// Jede Eingabe auf der Pruefungsseite sichern. Die Felder schreiben beim
+// Tippen direkt in die Tabellen (oninput) - hier wird daraus die dauerhafte
+// Sicherung. Ohne das ginge reines Tippen ohne Punkteaenderung verloren.
+try {
+  ['input', 'change'].forEach(function(typ){
+    document.addEventListener(typ, function(ev){
+      const seite = document.getElementById('page-pruefungssimulation-v2');
+      if (!seite || !ev.target || !seite.contains(ev.target)) return;
+      ps2StandSpeichernSpaeter();
+    }, true);
+  });
+} catch (e) {}
+
+// Beim Verlassen oder Wegwischen der App noch einmal sichern.
+try {
+  window.addEventListener('pagehide', ps2StandSpeichern);
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'hidden') ps2StandSpeichern();
+  });
+} catch (e) {}
 
 function zuruecksetzen(){
   const alleStateMaps = [
@@ -38683,11 +38818,16 @@ const PS2_AUFGABEN_NACH_JAHRGANG = {
 };
 
 // Lädt den gewählten Jahrgang: biegt AUFGABEN auf das richtige Array um, setzt
-// Titel/Untertitel, setzt den Übungsstand zurück (jeder Jahrgang startet frisch)
-// und öffnet die Prüfungsseite.
+// Titel/Untertitel, holt den gespeicherten Bearbeitungsstand dieses Jahrgangs
+// zurück (falls vorhanden) und öffnet die Prüfungsseite.
+// Der Stand bleibt erhalten, bis die Prüfung abgegeben wird.
 function ps2StarteJahrgang(jahrgangId){
   const j = PS2_JAHRGAENGE.find(x => x.id === jahrgangId);
   if (!j || !j.bereit) return;
+  // Zuerst den Stand des bisher geoeffneten Jahrgangs sichern, sonst geht er
+  // beim Wechsel verloren (zuruecksetzen() leert gleich alle Tabellen).
+  try { if (ps2SpeicherTimer) { clearTimeout(ps2SpeicherTimer); ps2SpeicherTimer = null; } } catch (e) {}
+  ps2StandSpeichern();
   AKTUELLER_JAHRGANG = j;
   AUFGABEN = PS2_AUFGABEN_NACH_JAHRGANG[jahrgangId];
   const titelEl = document.getElementById('ps2-titel');
@@ -38695,7 +38835,15 @@ function ps2StarteJahrgang(jahrgangId){
   const gesamtPkt = AUFGABEN.reduce((s,a)=>s+a.punkte,0);
   if (titelEl) titelEl.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-4px;margin-right:5px;"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Abgeleitete Prüfung aus ' + j.label;
   if (subEl) subEl.textContent = 'IHK Abschlussprüfung · Betriebswirtschaftliches Handeln · ' + AUFGABEN.length + ' Aufgaben · ' + gesamtPkt + ' Punkte';
+  // Erst alles leeren, dann den gespeicherten Stand dieses Jahrgangs zurueckholen.
+  // Wer eine Pruefung angefangen hat, findet sie genau so wieder vor.
   zuruecksetzen();
+  const wiederhergestellt = ps2StandLaden(jahrgangId);
+  if (wiederhergestellt) {
+    updateScoreHeader();
+    renderNav();
+    renderAufgabe();
+  }
   showPage('pruefungssimulation-v2', null);
 }
 
